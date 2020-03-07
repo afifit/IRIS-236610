@@ -46,7 +46,7 @@ public:
     
     SizeType ExpandVirtualGraph(SizeType new_size, bool lazy_computation=true);
     std::vector<Idx> SearchVirtualGraphCompleteLazy(const RealNum p=1.0, const RealNum eps=0.0);
-    std::vector<Idx> SearchVirtualGraph(const RealNum p=1.0, const RealNum eps=0.0);
+    std::vector<Idx> SearchVirtualGraph(const RealNum p=1.0, const RealNum eps=0.0, const Idx subsume_option = 1);
     SizeType VirtualGraphCoverageSize() const;
     SizeType ResultCoverageSize() const;
     RealNum ResultCost() const;
@@ -54,6 +54,9 @@ public:
     void PrintTitle(std::ostream &out) const;
     SizeType TotalTime() const;
     void SetMaxTimeAllowed(const SizeType& time);
+
+    int subsumed1[1000] = {0};
+    int subsumed2[1000] = {0};
 
 private:
     Inspection::GPtr graph_;
@@ -64,6 +67,7 @@ private:
 #if USE_GHOST_DATA
     RealNum p_{1};
     RealNum eps_{0};
+    Idx subsume_option_{1};
 #endif
     SizeType time_build_{0};
     SizeType time_vis_{0};
@@ -73,7 +77,9 @@ private:
     SizeType max_time_allowed_{10000000};
     std::shared_ptr<TracebackMap> map_;
 
+    //queue is the open list sorted by the cost function 
     std::shared_ptr<PriorityQueue> queue_;
+    //this is the collection of open sets each holds nodes with the same vertex, when finding subsuming partners
     std::vector<OpenSet> open_sets_;
     std::vector<ClosedSet> closed_sets_;
 
@@ -89,6 +95,11 @@ private:
     bool Dominates(const NodePtr n1, const NodePtr n2) const;
     bool ValidPath(const std::vector<Idx>& path);
     SizeType RelativeTime(const TimePoint start) const;
+
+    bool SubsumeFirstNode(NodePtr& node);
+    bool SubsumeBestNode(NodePtr& node);
+    bool SubsumeWorstNode(NodePtr& node);
+    bool SubsumeAllPairs(NodePtr& node);
 
     void PrintOpenSets() const;
     void PrintNodeStatus(const NodePtr node) const;

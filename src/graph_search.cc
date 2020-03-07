@@ -1,5 +1,7 @@
 #include "graph_search.h"
 
+
+using namespace std;
 GraphSearch::GraphSearch(Inspection::GPtr graph) : graph_(graph) {
 	virtual_graph_coverage_.Clear();
 	result_.reset(new Node(0));
@@ -101,9 +103,10 @@ std::vector<Idx> GraphSearch::SearchVirtualGraphCompleteLazy(const RealNum p, co
 
         // main search part
         bool found = false;
+      
         while(!queue_->empty()) {
+           
             auto n = PopFromQueueCompleteLazy();
-
             // not a valid node
             if (n == nullptr) { continue; }
 
@@ -170,14 +173,14 @@ std::vector<Idx> GraphSearch::SearchVirtualGraphCompleteLazy(const RealNum p, co
 
 }
 
-std::vector<Idx> GraphSearch::SearchVirtualGraph(const RealNum p, const RealNum eps) {
+std::vector<Idx> GraphSearch::SearchVirtualGraph(const RealNum p, const RealNum eps, const Idx subsume_option) {
 	const TimePoint start = Clock::now();
 
 #if USE_GHOST_DATA
 	p_ = p;
 	eps_ = eps;
+    subsume_option_ = subsume_option;
 #endif
-
 	Idx source = 0;
 
 	// traceback map
@@ -199,7 +202,6 @@ std::vector<Idx> GraphSearch::SearchVirtualGraph(const RealNum p, const RealNum 
 
 	// search, local pointer for result
 	NodePtr result_node = nullptr;
-
     // reset data structures
 	queue_.reset(new PriorityQueue);
 	open_sets_.resize(virtual_graph_size_);
@@ -224,7 +226,9 @@ std::vector<Idx> GraphSearch::SearchVirtualGraph(const RealNum p, const RealNum 
 
 	// main search part
 	bool found = false;
+     
 	while(!queue_->empty()) {
+      
 		auto n = PopFromQueue();
 
 		// not a valid node
@@ -380,6 +384,7 @@ void GraphSearch::ComputeAndAddSuccessors(const NodePtr parent) {
         new_node->SetSuccessorStaturID(id);
 
         if (DominatedByClosedState(new_node)) { continue; }
+
         if (DominatedByOpenState(new_node)) {
             if (parent->SuccessorStatusID() != id) { break; }
             continue;
@@ -525,11 +530,15 @@ bool GraphSearch::DominatedByClosedState(const NodePtr node) const {
 	return false;
 }
 
-bool GraphSearch::DominatedByOpenState(NodePtr& node) {
-    // this is a copy
-    Idx index = node->Index();
-    auto states = open_sets_[index];
+
+
+// subsume strategies:
+
+bool GraphSearch::SubsumeFirstNode(NodePtr& node ){
     
+    Idx index = node->Index();
+    //lior and dor: there is an open set for each layer of the graph.
+    auto states = open_sets_[index];
     // for (auto s : states) {
     for (auto it = states.begin(); it != states.end(); ++it) {
         NodePtr s = *it;
@@ -540,12 +549,15 @@ bool GraphSearch::DominatedByOpenState(NodePtr& node) {
         }
 
         // early return for duplicates
+        //lior: node already exists in open 
         if (node->Parent() == s->Parent() && fabs(node->CostToCome() - s->CostToCome()) < EPS) {
             s->SetSuccessorStaturID(node->SuccessorStatusID());
             return true;
         }
 
-        if (Dominates(s, node)) {
+        //dor and lior: checking dominates of s and node is the same as checking s + node is bounded
+        //              like line 18 in algorithm
+        if (Dominates(s, node)) { 
             if (!s->IsChecked()) {
                 bool local_path_valid = ValidPath(s->LocalPath());
                 s->SetChecked(true);
@@ -583,17 +595,18 @@ bool GraphSearch::DominatedByOpenState(NodePtr& node) {
 #if USE_GHOST_COST_AS_KEY
             auto cost_before = s->GhostCost();
 #endif
-
+            //LIOR: lines 18 to 23. This is the subsume in line 19.
             s->Subsume(node);
 
 #if USE_GHOST_COST_AS_KEY
+            //us: because s is in open, we need to mantain open list values
             auto cost_after = s->GhostCost();
             if (cost_after < cost_before) {
                 NodePtr updated(new Node(s));
                 s->SetLatest(false);
                 open_sets_[index].erase(s);
                 open_sets_[index].insert(updated);
-                queue_->push(updated);
+                queue_->push(updated);//what is q?
             }
 #endif
 
@@ -602,6 +615,7 @@ bool GraphSearch::DominatedByOpenState(NodePtr& node) {
 
         if (!IsUpToDate(node)) { return true; }
 
+        // lines 24 to 28.
         if (Dominates(node, s)) {
             if (!node->IsChecked()) {
                 bool local_path_valid = ValidPath(node->LocalPath());
@@ -639,8 +653,497 @@ bool GraphSearch::DominatedByOpenState(NodePtr& node) {
             open_sets_[index].erase(s);
         }
     }
-
+    //fales is to add node to open
     return false;
+
+}
+
+
+bool GraphSearch::SubsumeBestNode(NodePtr& node ){
+    //try to subsume the node which maximize the coverage
+
+    Idx index = node->Index();
+    //lior and dor: there is an open set for each layer of the graph.
+    auto states = open_sets_[index];
+    // for (auto s : states) {
+    NodePtr maxNode = nullptr;
+    RealNum maxCoverage = 0.0;
+
+    NodePtr maxNodeReverse = nullptr;
+    RealNum maxCoverageReverse = 0.0;
+
+    //find the best node to subsume, the largest coverage rate we can obtain
+    VisibilitySet node_union_set = node->GhostVisSet();
+    for (auto it = states.begin(); it != states.end(); ++it) {
+        NodePtr s = *it;
+
+       //same checks as original
+       if (!IsUpToDate(s)) {
+            open_sets_[index].erase(s);
+            continue;
+        }
+       if (node->Parent() == s->Parent() && fabs(node->CostToCome() - s->CostToCome()) < EPS) {
+            s->SetSuccessorStaturID(node->SuccessorStatusID());
+            return true;
+        }
+        //get union of visibility set
+        VisibilitySet union_set = s->GhostVisSet();
+	    union_set.Insert(node_union_set);
+	    auto coverage = s->CoverageSize()/(RealNum)union_set.Size();
+
+        //check Dominates(s, node)
+        if( (s->CostToCome() <= (1+eps_)*(node->GhostCost())) && coverage >= p_ && coverage >= maxCoverage){
+            maxNode = s;
+        }
+        // check Dominates(node,s)
+        if( (node->CostToCome() <= (1+eps_)*(s->GhostCost())) && coverage >= p_ && coverage >= maxCoverageReverse){
+            maxNodeReverse = s;
+        }
+        //note - the only difference is the length, the coverage of them is the same!
+
+    }
+    if(maxNode == nullptr && maxNodeReverse == nullptr){
+        return false;
+    }
+    //from here i left it untouched. using the node s above to subsume. First we try Dom(s,node), then Dom(node,s)
+    NodePtr s = maxNode;
+        //dor and lior: checking dominates of s and node is the same as checking s + node is bounded
+        //              like line 18 in algorithm
+        if (s != nullptr && Dominates(s, node)) { 
+
+            if (!s->IsChecked()) {
+                bool local_path_valid = ValidPath(s->LocalPath());
+                s->SetChecked(true);
+                s->SetValid(local_path_valid);
+
+                if (!local_path_valid) {
+                    open_sets_[index].erase(s);
+                    ComputeAndAddSuccessors(s->Parent());
+
+                    return DominatedByOpenState(node);
+                }
+            }
+
+#if DEBUG_MODE
+            std::cout << s->Index() << " as child of ";
+            if (s->Parent()) {
+                std::cout << s->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+            std::cout << " subsumes " << node->Index() << " as child of ";
+            if (node->Parent()) {
+                std::cout << node->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+
+            std::cout << std::endl;
+            std::cout << s->IsChecked() << std::endl;
+            getchar();
+#endif
+
+#if USE_GHOST_COST_AS_KEY
+            auto cost_before = s->GhostCost();
+#endif
+            //LIOR: lines 18 to 23. This is the subsume in line 19.
+            s->Subsume(node);
+
+#if USE_GHOST_COST_AS_KEY
+            //us: because s is in open, we need to mantain open list values
+            auto cost_after = s->GhostCost();
+            if (cost_after < cost_before) {
+                NodePtr updated(new Node(s));
+                s->SetLatest(false);
+                open_sets_[index].erase(s);
+                open_sets_[index].insert(updated);
+                queue_->push(updated);//what is q?
+            }
+#endif
+
+            return true;
+        }
+
+        if (!IsUpToDate(node)) { return true; }
+
+        s = maxNodeReverse;
+        // lines 24 to 28.
+        if (s != nullptr && Dominates(node, s)) {
+            if (!node->IsChecked()) {
+                bool local_path_valid = ValidPath(node->LocalPath());
+                node->SetChecked(true);
+                node->SetValid(local_path_valid);
+
+                if (!local_path_valid) {
+                    ComputeAndAddSuccessors(node->Parent());
+                    return true;
+                }
+            }
+
+#if DEBUG_MODE
+            std::cout << node->Index() << " as child of ";
+            if (node->Parent()) {
+                std::cout << node->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+            std::cout << " subsumes " << s->Index() << " as child of ";
+            if (s->Parent()) {
+                std::cout << s->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+
+            std::cout << std::endl;
+            std::cout << node->IsChecked() << std::endl;
+            getchar();
+#endif
+
+            node->Subsume(s);
+            open_sets_[index].erase(s);
+        }
+    //fales is to add node to open
+    return false;
+
+}
+
+bool GraphSearch::SubsumeWorstNode(NodePtr& node ){
+    //try to subsume the node which minimize the coverage
+
+    Idx index = node->Index();
+    //lior and dor: there is an open set for each layer of the graph.
+    auto states = open_sets_[index];
+    // for (auto s : states) {
+    NodePtr minNode = nullptr;
+    RealNum minCoverage = 0.0;
+
+    NodePtr minNodeReverse = nullptr;
+    RealNum minCoverageReverse = 0.0;
+
+    //find the best node to subsume, the largest coverage rate we can obtain
+    VisibilitySet node_union_set = node->GhostVisSet();
+    for (auto it = states.begin(); it != states.end(); ++it) {
+        NodePtr s = *it;
+
+       //same checks as original
+       if (!IsUpToDate(s)) {
+            open_sets_[index].erase(s);
+            continue;
+        }
+       if (node->Parent() == s->Parent() && fabs(node->CostToCome() - s->CostToCome()) < EPS) {
+            s->SetSuccessorStaturID(node->SuccessorStatusID());
+            return true;
+        }
+        //get union of visibility set
+        VisibilitySet union_set = s->GhostVisSet();
+	    union_set.Insert(node_union_set);
+	    auto coverage = s->CoverageSize()/(RealNum)union_set.Size();
+
+        //check Dominates(s, node)
+        if( (s->CostToCome() <= (1+eps_)*(node->GhostCost())) && coverage >= p_ && coverage <= minCoverage){
+            minNode = s;
+        }
+        // check Dominates(node,s)
+        if( (node->CostToCome() <= (1+eps_)*(s->GhostCost())) && coverage >= p_ && coverage <= minCoverageReverse){
+            minNodeReverse = s;
+        }
+        //note - the only difference is the length, the coverage of them is the same!
+
+    }
+    if(minNode == nullptr && minNodeReverse == nullptr){
+        return false;
+    }
+    //from here i left it untouched. using the node s above to subsume. First we try Dom(s,node), then Dom(node,s)
+    NodePtr s = minNode;
+        //dor and lior: checking dominates of s and node is the same as checking s + node is bounded
+        //              like line 18 in algorithm
+        if (s != nullptr && Dominates(s, node)) { 
+
+            if (!s->IsChecked()) {
+                bool local_path_valid = ValidPath(s->LocalPath());
+                s->SetChecked(true);
+                s->SetValid(local_path_valid);
+
+                if (!local_path_valid) {
+                    open_sets_[index].erase(s);
+                    ComputeAndAddSuccessors(s->Parent());
+
+                    return DominatedByOpenState(node);
+                }
+            }
+
+#if DEBUG_MODE
+            std::cout << s->Index() << " as child of ";
+            if (s->Parent()) {
+                std::cout << s->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+            std::cout << " subsumes " << node->Index() << " as child of ";
+            if (node->Parent()) {
+                std::cout << node->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+
+            std::cout << std::endl;
+            std::cout << s->IsChecked() << std::endl;
+            getchar();
+#endif
+
+#if USE_GHOST_COST_AS_KEY
+            auto cost_before = s->GhostCost();
+#endif
+            //LIOR: lines 18 to 23. This is the subsume in line 19.
+            s->Subsume(node);
+
+#if USE_GHOST_COST_AS_KEY
+            //us: because s is in open, we need to mantain open list values
+            auto cost_after = s->GhostCost();
+            if (cost_after < cost_before) {
+                NodePtr updated(new Node(s));
+                s->SetLatest(false);
+                open_sets_[index].erase(s);
+                open_sets_[index].insert(updated);
+                queue_->push(updated);//what is q?
+            }
+#endif
+
+            return true;
+        }
+
+        if (!IsUpToDate(node)) { return true; }
+
+        s = minNodeReverse;
+        // lines 24 to 28.
+        if (s != nullptr && Dominates(node, s)) {
+            if (!node->IsChecked()) {
+                bool local_path_valid = ValidPath(node->LocalPath());
+                node->SetChecked(true);
+                node->SetValid(local_path_valid);
+
+                if (!local_path_valid) {
+                    ComputeAndAddSuccessors(node->Parent());
+                    return true;
+                }
+            }
+
+#if DEBUG_MODE
+            std::cout << node->Index() << " as child of ";
+            if (node->Parent()) {
+                std::cout << node->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+            std::cout << " subsumes " << s->Index() << " as child of ";
+            if (s->Parent()) {
+                std::cout << s->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+
+            std::cout << std::endl;
+            std::cout << node->IsChecked() << std::endl;
+            getchar();
+#endif
+
+            node->Subsume(s);
+            open_sets_[index].erase(s);
+        }
+    //fales is to add node to open
+    return false;
+
+}
+
+
+bool GraphSearch::SubsumeAllPairs(NodePtr& node ){
+    
+    Idx index = node->Index();
+    //lior and dor: there is an open set for each layer of the graph.
+    auto states = open_sets_[index];
+    // for (auto s : states) {
+
+    auto valid = false;    
+    for (auto it = states.begin(); it != states.end(); ++it) {
+        NodePtr s = *it;
+        // remove out of date nodes
+        if (!IsUpToDate(s)) {
+            open_sets_[index].erase(s);
+            continue;
+        }
+
+        // early return for duplicates
+        //lior: node already exists in open 
+        if (node->Parent() == s->Parent() && fabs(node->CostToCome() - s->CostToCome()) < EPS) {
+            s->SetSuccessorStaturID(node->SuccessorStatusID());
+            return true;
+        }
+
+        //dor and lior: checking dominates of s and node is the same as checking s + node is bounded
+        //              like line 18 in algorithm
+        if (Dominates(s, node)) { 
+            if (!s->IsChecked()) {
+                bool local_path_valid = ValidPath(s->LocalPath());
+                s->SetChecked(true);
+                s->SetValid(local_path_valid);
+
+                if (!local_path_valid) {
+                    open_sets_[index].erase(s);
+                    ComputeAndAddSuccessors(s->Parent());
+
+                    return DominatedByOpenState(node);
+                }
+            }
+
+#if DEBUG_MODE
+            std::cout << s->Index() << " as child of ";
+            if (s->Parent()) {
+                std::cout << s->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+            std::cout << " subsumes " << node->Index() << " as child of ";
+            if (node->Parent()) {
+                std::cout << node->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+
+            std::cout << std::endl;
+            std::cout << s->IsChecked() << std::endl;
+            getchar();
+#endif
+
+#if USE_GHOST_COST_AS_KEY
+            auto cost_before = s->GhostCost();
+#endif
+            //LIOR: lines 18 to 23. This is the subsume in line 19.
+            s->Subsume(node);
+
+#if USE_GHOST_COST_AS_KEY
+            //us: because s is in open, we need to mantain open list values
+            auto cost_after = s->GhostCost();
+            if (cost_after < cost_before) {
+                NodePtr updated(new Node(s));
+                s->SetLatest(false);
+                open_sets_[index].erase(s);
+                open_sets_[index].insert(updated);
+                queue_->push(updated);//what is q?
+            }
+#endif
+
+            // return true;
+            // remember we subsumed s and try to subsume other paths
+            valid = true;
+        }
+
+        if (!IsUpToDate(node)) { return true; }
+    } 
+    //if didnt subsume, try other way around
+    if(valid) return true;
+    // try to subsume other way around
+        for (auto it = states.begin(); it != states.end(); ++it) {
+        NodePtr s = *it;
+        // lines 24 to 28.
+        if (Dominates(node, s)) {
+            if (!node->IsChecked()) {
+                bool local_path_valid = ValidPath(node->LocalPath());
+                node->SetChecked(true);
+                node->SetValid(local_path_valid);
+
+                if (!local_path_valid) {
+                    ComputeAndAddSuccessors(node->Parent());
+                    return true;
+                }
+            }
+
+#if DEBUG_MODE
+            std::cout << node->Index() << " as child of ";
+            if (node->Parent()) {
+                std::cout << node->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+            std::cout << " subsumes " << s->Index() << " as child of ";
+            if (s->Parent()) {
+                std::cout << s->Parent()->Index();
+            } 
+            else {
+                std::cout << " nullptr ";
+            }
+
+            std::cout << std::endl;
+            std::cout << node->IsChecked() << std::endl;
+            getchar();
+#endif
+
+            node->Subsume(s);
+            open_sets_[index].erase(s);
+        }
+    }
+    //fales is to add node to open
+    return false;
+}
+
+//node = (v,Iv,PPv)
+bool GraphSearch::DominatedByOpenState(NodePtr& node) {
+    // this is a copy
+
+    Idx index = node->Index();
+    //lior and dor: there is an open set for each layer of the graph.
+    auto states = open_sets_[index];
+    // us: we
+
+
+#if SUBSUME_HISTO
+    auto sum1 = 0, sum2 = 0;
+    for (auto it = states.begin(); it != states.end(); ++it) {
+
+        NodePtr s = *it;
+
+         if (Dominates(s, node)) { 
+            sum1++;
+         }
+         if (Dominates(node, s)) { 
+            sum2++;
+         }
+    }
+    subsumed1[sum1]++;
+    subsumed2[sum2]++;
+
+#endif
+
+    if(subsume_option_ == 1){
+        //std::cout << "using first node to subsume" <<std::endl;
+        return SubsumeFirstNode(node);
+    }
+    if(subsume_option_ == 2){
+        //std::cout << "using best node to subsume" <<std::endl;
+        return SubsumeBestNode(node);
+    }
+    if(subsume_option_ == 3){
+        //std::cout << "using worst node to subsume" <<std::endl;
+        return SubsumeWorstNode(node);
+    }
+    if(subsume_option_ == 4){
+        //std::cout << "using worst node to subsume" <<std::endl;
+        return SubsumeAllPairs(node);
+    }
+    std::cout << "EXCEPTION LIOR - bad subsuming parameter! " << subsume_option_ << std::endl; 
+    throw new string("exception lior");
+    return false;
+    //end us
 }
 
 bool GraphSearch::DominatedByOpenStateCompleteLazy(NodePtr& node) {

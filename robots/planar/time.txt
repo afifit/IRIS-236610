@@ -1,0 +1,2 @@
+RUNNING TIME FOR PLANAR - 0 minutes and 28 seconds elapsed.
+RUNNING TIME FOR PLANAR - 59 minutes and 59 seconds elapsed.
